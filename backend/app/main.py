@@ -16,22 +16,21 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# --- IMPROVED PATH HANDLING ---
-# Isse Docker aur Local dono mein path sahi rehta hai
+# --- PATH HANDLING ---
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 MODEL_PATH = os.path.join(BASE_DIR, "models", "bank_loan_ai_v1.joblib")
 
 # Global variables
 model = None
-best_threshold = 0.5
+best_threshold = 0.87
 required_features = []
 
-# Model Loading with Error Handling
+# Model Loading
 if os.path.exists(MODEL_PATH):
     try:
         bundle = joblib.load(MODEL_PATH)
         model = bundle['model']
-        best_threshold = bundle.get('best_threshold', 0.5)
+        best_threshold = bundle.get('best_threshold', 0.87)
         required_features = bundle.get('features', [])
         print(f"✅ Model Loaded Successfully! (Threshold: {best_threshold})")
     except Exception as e:
@@ -39,12 +38,14 @@ if os.path.exists(MODEL_PATH):
 else:
     print(f"❌ Model file not found at {MODEL_PATH}")
 
-# Input Schema
+# Input Schema (Updated to include Emp_Status_Num and DTI_Ratio)
 class UserInput(BaseModel):
     Age: int
     Income: float
     Credit_Score: int
     Loan_Amount: float
+    Emp_Status_Num: int  # Added based on your formulas
+    DTI_Ratio: float     # Added based on your formulas
 
 @app.get("/")
 def health_check():
@@ -52,28 +53,31 @@ def health_check():
 
 @app.post("/predict")
 def predict_loan(data: UserInput):
-    # 1. Check if model is loaded
     if model is None:
         raise HTTPException(status_code=503, detail="Model not loaded on server")
 
     try:
-        # 2. Convert to dict (Pydantic v2 recommends model_dump)
+        # 1. Get raw input data
         raw_data = data.model_dump()
+        df = pd.DataFrame([raw_data])
         
-        # 3. FEATURE ENGINEERING
-        # (Income * Credit_Score) / Loan_Amount
-        stability_score = (raw_data['Income'] * raw_data['Credit_Score']) / raw_data['Loan_Amount']
+        # 2. EXACT FEATURE ENGINEERING (As per your provided formulas)
+        df['Emp_Credit_Stability'] = df['Emp_Status_Num'] * df['Credit_Score']
+        df['Income_Debt_Ratio'] = df['Income'] / (df['DTI_Ratio'] + 0.01)
+        df['Loan_Eligibility_Factor'] = df['Income'] * df['Credit_Score']
+        df['Net_Financial_Health'] = (df['Income'] * df['Emp_Status_Num']) - df['DTI_Ratio']
         
-        # 4. Prepare DataFrame
-        input_dict = raw_data.copy()
-        input_dict['Emp_Credit_Stability'] = stability_score
+        # 3. Filter and Order Features
+        if required_features:
+            # Check if any required feature is missing
+            missing = [f for f in required_features if f not in df.columns]
+            if missing:
+                raise ValueError(f"Missing engineered features: {missing}")
+            final_df = df[required_features]
+        else:
+            final_df = df
         
-        input_df = pd.DataFrame([input_dict])
-        
-        # Ensure feature order matches training
-        final_df = input_df[required_features] if required_features else input_df
-        
-        # 5. Model Prediction
+        # 4. Model Prediction
         prob = model.predict_proba(final_df)[:, 1][0]
         is_approved = float(prob) >= best_threshold
         
@@ -81,11 +85,13 @@ def predict_loan(data: UserInput):
             "status": "Success",
             "decision": "Approved" if is_approved else "Rejected",
             "probability": round(float(prob), 4),
-            "threshold": best_threshold,
-            "input_summary": raw_data
+            "threshold": best_threshold
         }
+        
     except Exception as e:
+        # Detailed error for Render logs
         raise HTTPException(status_code=500, detail=str(e))
 
 if __name__ == "__main__":
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    port = int(os.environ.get("PORT", 8000))
+    uvicorn.run(app, host="0.0.0.0", port=port)
